@@ -43,7 +43,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 GH_API = "https://api.github.com"
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -698,7 +698,7 @@ def build_system_prompt(cfg: Config) -> str:
         f'{i}. {s.title.upper()} (key "{s.key}"): {s.checklist}' for i, s in enumerate(cfg.all_sections, 1)
     )
     finding = (
-        '{"severity": "P0"|"P1"|"P2"|"P3", "file": "...", "line": 123, '
+        '{"severity": "P0"|"P1"|"P2"|"P3", "file": "...", "line": 123, "quote": "...", '
         '"reference": "...", "issue": "...", "suggestion": "..."}'
     )
     schema = ",\n".join(f'  "{s.key}": [{finding}, ...]' for s in cfg.all_sections)
@@ -734,6 +734,17 @@ Give every finding one severity:
 - P3: minor, optional improvement
 Report only real problems. Never report style nits that linters and formatters cover.
 Do not invent issues; an empty section is a good result.
+
+Evidence rules:
+- Every finding about a file includes "quote": one line copied character for character
+  from the diff or the file contents in the user message (without the leading +/-), the
+  line that shows the problem. The script checks the quote against the PR: a P0 whose
+  quote is missing or not found is shown as P1.
+- Before reporting, re-read the quoted line. If it already does what you would ask for,
+  drop the finding. Report only problems present in the new version.
+- Cite only what the user message contains: no URLs, document sections or files that it
+  does not contain.
+- A P0 security finding names the concrete way it can be exploited; without one it is not P0.
 
 Output STRICT JSON only, no markdown fences:
 {{
@@ -857,6 +868,38 @@ def severity_of(item: dict[str, Any]) -> str:
     return LEGACY_SEVERITY.get(raw.lower(), "P2")  # unknown -> middle of the scale
 
 
+MIN_QUOTE_CHARS = 4
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split())
+
+
+def quote_found(quote: str, evidence: str) -> bool:
+    """Whether the model's quote occurs in the context it was given.
+
+    Whitespace is normalized (the model may reflow indentation); a leading
+    diff marker (+/-) is ignored.
+    """
+    q = _squash(quote)
+    if q[:1] in "+-" and len(q) > 1:
+        q = q[1:].strip()
+    return len(q) >= MIN_QUOTE_CHARS and q in evidence
+
+
+def check_evidence(items: list[dict[str, Any]], evidence: str) -> None:
+    """Mark each finding's quote as verified or not; a P0 without a verified
+    quote is downgraded to P1 (a single invented P0 would otherwise flip the
+    verdict to request_changes)."""
+    squashed = _squash(evidence)
+    for it in items:
+        quote = it.get("quote")
+        it["quote_ok"] = isinstance(quote, str) and quote_found(quote, squashed)
+        if it["severity"] == "P0" and not it["quote_ok"]:
+            it["severity"] = "P1"
+            it["downgraded"] = True
+
+
 def findings(review: dict[str, Any], section: Section) -> list[dict[str, Any]]:
     items = review.get(section.key)
     if not isinstance(items, list):
@@ -883,6 +926,14 @@ def _one_line(value: Any) -> str:
     return " ".join(str(value).split())
 
 
+def _code(text: str) -> str:
+    """Inline code that survives backticks inside `text`."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
 def _finding_line(it: dict[str, Any], section: Section) -> list[str]:
     level = it["severity"]
     label = section.labels[SEVERITIES.index(level)]
@@ -890,15 +941,27 @@ def _finding_line(it: dict[str, Any], section: Section) -> list[str]:
     if it.get("line"):
         loc += f":{_one_line(it['line'])}"
     ref = f" _({_one_line(it['reference'])})_" if it.get("reference") else ""
-    lines = [f"- `{level} · {label}` **{loc}** -- {_one_line(it['issue'])}{ref}"]
+    was = " _(was P0: quote missing or not found in the PR)_" if it.get("downgraded") else ""
+    lines = [f"- `{level} · {label}` **{loc}** -- {_one_line(it['issue'])}{ref}{was}"]
+    quote = it.get("quote")
+    if isinstance(quote, str) and quote.strip():
+        shown = _code(_one_line(quote)[:200])
+        lines.append(f"  - 📌 {shown}" if it.get("quote_ok") else f"  - 📌 not found in the PR: {shown}")
     if it.get("suggestion"):
         lines.append(f"  - 💡 {_one_line(it['suggestion'])}")
     return lines
 
 
-def render_review(repo: str, cfg: Config, reply: Reply, head_sha: str, notices: Notices) -> str:
+def render_review(
+    repo: str, cfg: Config, reply: Reply, head_sha: str, notices: Notices, evidence: str
+) -> str:
+    """The comment. `evidence` is the user message the model saw; quotes are
+    checked against it."""
     review = reply.review
     per_section = [(s, findings(review, s)) for s in cfg.all_sections]
+    for _, items in per_section:
+        check_evidence(items, evidence)
+        items.sort(key=lambda it: SEVERITIES.index(it["severity"]))
     counts = {lvl: 0 for lvl in SEVERITIES}
     for _, items in per_section:
         for it in items:
@@ -1058,7 +1121,7 @@ def run(argv: list[str] | None = None, env: dict[str, str] | None = None) -> Non
 
     print(f"ai-review: PR #{pr_number}, model {cfg.model}, {len(system) + len(user):,} chars of context")
     reply = call_mistral(cfg, api_key, system, user)
-    post_comment(gh, pr_number, render_review(repo, cfg, reply, ctx.head_sha, notices))
+    post_comment(gh, pr_number, render_review(repo, cfg, reply, ctx.head_sha, notices, user))
     print(f"ai-review: review posted on PR #{pr_number}")
 
 

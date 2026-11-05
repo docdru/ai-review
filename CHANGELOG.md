@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0 – 2026-11-05
+
+- **Evidence for findings.** Every finding about a file carries a `quote`: one
+  line copied from the diff or the file. The script checks it against the
+  context the model saw (whitespace-insensitive, diff markers ignored) and
+  shows it under the finding. A **P0 whose quote is missing or not found is
+  shown as P1**, so a single invented finding can no longer turn the verdict
+  into `request_changes`.
+- Prompt: re-read the quoted line before reporting and drop findings the code
+  already handles; cite only what the context contains (no invented URLs or
+  document sections); a P0 security finding must name how it can be exploited.
+
 ## 1.0.0 – 2026-11-05
 
 First release.

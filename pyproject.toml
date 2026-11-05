@@ -1,6 +1,6 @@
 [project]
 name = "ai-review"
-version = "1.0.0"
+version = "1.1.0"
 description = "AI pull-request review with the Mistral API (GitHub composite action)"
 requires-python = ">=3.11"
 

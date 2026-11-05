@@ -58,6 +58,11 @@ depends on the section.
 
 Style nits that linters cover are never reported.
 
+**Evidence:** every finding about a file quotes the line it is about. The
+quote is checked against the PR and shown under the finding, so a finding can
+be verified at a glance. A P0 whose quote is missing or not found in the PR is
+shown as P1 (marked "was P0"), so one invented finding can't block a PR.
+
 ## Setup in a repository
 
 1. Add the repository secret `MISTRAL_API_KEY`

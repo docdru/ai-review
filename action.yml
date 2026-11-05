@@ -1,0 +1,34 @@
+name: AI PR review (Mistral)
+description: >-
+  Reviews a pull request with the Mistral API, guided by the repository's
+  .github/ai-review.toml, and posts the result as one PR comment that is
+  updated on every push.
+author: docdru
+
+inputs:
+  mistral-api-key:
+    description: Mistral API key (pass a repository secret).
+    required: true
+  github-token:
+    description: Token to read the PR and post the comment (needs contents read, pull-requests write).
+    required: false
+    default: ${{ github.token }}
+  config:
+    description: Path of the review config, read from the PR's base commit.
+    required: false
+    default: .github/ai-review.toml
+
+runs:
+  using: composite
+  steps:
+    # Standard library only: the runner's python3 (>= 3.11) is enough, nothing
+    # is installed. Inputs reach the script only through env:, never through
+    # ${{ }} inside run: (no shell injection).
+    - name: Run AI review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        MISTRAL_API_KEY: ${{ inputs.mistral-api-key }}
+        AI_REVIEW_CONFIG: ${{ inputs.config }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: python3 "$GITHUB_ACTION_PATH/ai_review.py"

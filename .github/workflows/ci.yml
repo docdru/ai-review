@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 = the oldest supported (tomllib); "system" = what callers get
+        python: ["3.11", "3.13", "system"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        if: matrix.python != 'system'
+      - name: Unit tests (standard library, no network, no secrets)
+        env:
+          PY: ${{ matrix.python }}
+        run: |
+          if [ "$PY" = system ]; then python3 --version; python3 -m unittest discover -s tests -v
+          else uv run --no-project --python "$PY" python -m unittest discover -s tests -v; fi
+
+  lint:
+    name: Lint, types, workflow audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Ruff lint
+        run: uvx ruff@0.16.9 check --output-format=github
+      - name: Ruff format
+        run: uvx ruff@0.16.9 format --check --diff
+      - name: mypy (strict)
+        run: uvx mypy@2.3.1
+      - name: Workflow and action audit (zizmor)
+        run: uvx zizmor@1.32.0 --format=github .github/workflows action.yml examples

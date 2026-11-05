@@ -1,0 +1,60 @@
+# Copy to .github/ai-review.toml in the calling repository and adapt.
+# The action reads this file from the PR's base branch (main): changes take
+# effect after they are merged. Try a change first with
+#   python3 ai_review.py --repo owner/name --pr N --dry-run --config this.toml
+
+# Pinned model. Known models get their context budget automatically; for any
+# other model also set `context_tokens` (its context window).
+model = "mistral-large-2512"
+
+# Who the reviewer works for, in one or two sentences ("You are a senior
+# reviewer for ..."). Stack, users and what matters most.
+project = """
+'example', a small open-source Python library on PyPI (src/example/, tests in
+tests/ with pytest, CI in .github/workflows)."""
+
+# Optional: extra rules and known tricky areas, added to the prompt as is.
+instructions = """
+Known sensitive areas: date handling across time zones."""
+
+# Documents sent with every review, read at the PR's head commit. Never trimmed
+# for the budget; each is capped at max_chars (default 100,000).
+# required = true (default) -> a notice in the review if the file is missing.
+reference_docs = [
+  { path = "README.md", role = "user docs, the public API contract" },
+  { path = "CHANGELOG.md", role = "release notes" },
+  { path = "AGENTS.md", role = "binding project rules", required = false },
+]
+
+# Generated files: listed by name only, their diff and content are not sent.
+generated_files = ["uv.lock"]
+generated_suffixes = []
+# Added to the built-in binary list (images, fonts, archives, audio/video ...).
+extra_binary_suffixes = []
+
+# Review sections, in order. A "Surprising changes" section is always added
+# last. security = true -> labels Critical/High/Medium/Low instead of
+# Blocker/Bug/Maintainability/Minor. reference = true -> every finding must
+# cite a reference document section.
+[[sections]]
+key = "correctness"
+title = "🧪 Correctness & tests"
+checklist = """
+logic errors, edge cases, behaviour changes without tests, bug fixes without a
+regression test, removed or weakened assertions."""
+
+[[sections]]
+key = "api_docs"
+title = "📚 API & docs consistency"
+reference = true
+checklist = """
+public API changes need a CHANGELOG entry and a version bump; README examples
+must still work."""
+
+[[sections]]
+key = "security"
+title = "🔒 Security & supply chain"
+security = true
+checklist = """
+no eval/exec/pickle of user input; GitHub Actions pinned to commit SHAs with
+minimal permissions; no committed secrets; new dependencies justified."""

@@ -1,0 +1,22 @@
+[project]
+name = "ai-review"
+version = "1.0.0"
+description = "AI pull-request review with the Mistral API (GitHub composite action)"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PL"]
+ignore = [
+  "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",  # long, flat functions read better here
+  "PLW0603",  # module-level test seams (SEND, SLEEP, CLOCK, DEADLINE)
+  "RUF001",   # emoji / zero-width space in strings are intended
+]
+
+[tool.mypy]
+files = ["ai_review.py"]
+strict = true
+python_version = "3.11"

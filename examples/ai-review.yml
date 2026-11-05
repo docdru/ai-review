@@ -1,0 +1,40 @@
+# Copy to .github/workflows/ai-review.yml in the calling repository.
+name: AI PR Review
+
+# Trigger: plain `pull_request`, not `pull_request_target`. Reviews run only
+# for PRs from branches in this repository by authors with write access (see
+# `if:`). Those authors can already run any workflow with the repo's secrets,
+# so `pull_request` adds no exposure, while it avoids the "pwn request" class
+# of attacks that `pull_request_target` invites. Fork PRs get no secrets under
+# `pull_request` and are skipped. The action reads all PR content as text
+# through the GitHub API and never runs anything from the PR.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true # superseded pushes cancel stale reviews
+
+jobs:
+  review:
+    name: AI review (Mistral)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # PR files, reference docs and the config via the API
+      pull-requests: write # create / update the review comment
+    # Skip drafts (reviewed once marked ready), fork PRs, bots, and authors
+    # without write access (keeps strangers from spending API credit).
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
+      github.event.pull_request.user.type != 'Bot'
+    steps:
+      # No checkout: the action reads everything through the API.
+      - uses: docdru/ai-review@SHA # vX.Y.Z (Dependabot keeps the pin current)
+        with:
+          mistral-api-key: ${{ secrets.MISTRAL_API_KEY }}

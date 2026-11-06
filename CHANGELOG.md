@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 – 2026-11-05
+## 1.1.0 – 2026-11-06
 
 - **Evidence for findings.** Every finding about a file carries a `quote`: one
   line copied from the diff or the file. The script checks it against the
@@ -11,6 +11,12 @@
 - Prompt: re-read the quoted line before reporting and drop findings the code
   already handles; cite only what the context contains (no invented URLs or
   document sections); a P0 security finding must name how it can be exploited.
+- **More room for large PRs.** New files are sent once: the diff only names
+  them, since their full content is sent anyway (it used to be sent twice, as
+  an all-"+" patch and as the file). The budget assumes 3 characters per token
+  instead of 2, based on ~3.6 measured in real reviews: ≈ 743k instead of
+  ≈ 496k characters for Mistral Large 3. Configurable as `chars_per_token`.
+- Binary files no longer count toward `max_files`.
 
 ## 1.0.0 – 2026-11-05
 

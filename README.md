@@ -101,19 +101,25 @@ Unknown keys are errors, so typos fail loudly.
 | `reference_docs` | `[]` | `{ path, role, required = true, max_chars = 100000 }` |
 | `generated_files` / `generated_suffixes` | `[]` | not sent, only named |
 | `extra_binary_suffixes` | `[]` | added to the built-in list |
-| `max_files` | `50` | more changed files: the PR is skipped with a comment |
+| `max_files` | `50` | more changed (non-binary) files: the PR is skipped with a comment |
 | `max_file_chars` | `150000` | per changed file |
+| `chars_per_token` | `3.0` | sizes the context budget (1.5–4.5); lower it if the model reports an oversized request |
 | `[[sections]]` | – (≥ 1) | `key`, `title`, `checklist`, `security = false`, `reference = false`, `labels` (4 strings) |
 
 ### Context budget
 
-The budget is derived from the model: `(context_tokens − max_output_tokens) × 2`
-characters (≈ 496k for Mistral Large 3). Ordinary PRs are far below it and
-see no truncation. Above it, changed files are trimmed first (spread
+The budget is derived from the model: `(context_tokens − max_output_tokens) ×
+chars_per_token` characters, ≈ 743k for Mistral Large 3. Real reviews measured
+about 3.6 characters per token; the default of 3 leaves headroom for text that
+tokenizes worse.
+
+New files are sent once: the diff only names them, and their full content
+follows with the other changed files. Ordinary PRs are far below the budget
+and see no truncation. Above it, changed files are trimmed first (spread
 proportionally), then the diff; reference docs never. Every cut is marked for
 the model and listed as a notice in the comment. PRs with more than
-`max_files` files or a diff over 1.5M characters get a "review skipped"
-comment instead, which also replaces an older, now stale review.
+`max_files` non-binary files or a diff over 1.5M characters get a "review
+skipped" comment instead, which also replaces an older, now stale review.
 
 ### Failures
 

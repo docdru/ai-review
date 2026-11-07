@@ -57,9 +57,11 @@ KNOWN_MODELS = {
     "mistral-large-2512": 256_000,  # Mistral Large 3 (Dec 2025)
 }
 DEFAULT_MAX_OUTPUT_TOKENS = 8_192
-# Code averages ~3-4 characters per token; 2 characters per token keeps even a
-# worst-case prompt inside the window (with the reply reserved).
-CHARS_PER_TOKEN_BUDGET = 2
+# Characters per token used to size the budget. Real reviews measured ~3.6
+# (code, Markdown, JSON); 3 leaves ~20% headroom for text that tokenizes worse
+# (non-English prose, minified code). Configurable as `chars_per_token`.
+DEFAULT_CHARS_PER_TOKEN = 3.0
+MIN_CHARS_PER_TOKEN, MAX_CHARS_PER_TOKEN = 1.5, 4.5
 
 HARD_SKIP_CHARS = 1_500_000  # a bigger diff can't be reviewed meaningfully in one call
 DEFAULT_MAX_FILES = 50
@@ -156,6 +158,7 @@ class Config:
     binary_suffixes: tuple[str, ...] = DEFAULT_BINARY_SUFFIXES
     max_files: int = DEFAULT_MAX_FILES
     max_file_chars: int = DEFAULT_MAX_FILE_CHARS
+    chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
 
     @property
     def all_sections(self) -> list[Section]:
@@ -163,13 +166,13 @@ class Config:
 
     @property
     def max_total_chars(self) -> int:
-        return (self.context_tokens - self.max_output_tokens) * CHARS_PER_TOKEN_BUDGET
+        return int((self.context_tokens - self.max_output_tokens) * self.chars_per_token)
 
 
 _TOP_KEYS = {
     "project", "sections", "model", "context_tokens", "max_output_tokens", "instructions",
     "reference_docs", "generated_files", "generated_suffixes", "extra_binary_suffixes",
-    "max_files", "max_file_chars",
+    "max_files", "max_file_chars", "chars_per_token",
 }  # fmt: skip
 _SECTION_KEYS = {"key", "title", "checklist", "reference", "labels", "security"}
 _DOC_KEYS = {"path", "role", "required", "max_chars"}
@@ -277,7 +280,16 @@ def parse_config(text: str, source: str = DEFAULT_CONFIG_PATH) -> Config:
         binary_suffixes=DEFAULT_BINARY_SUFFIXES + _str_list(raw, "extra_binary_suffixes"),
         max_files=_expect(raw.get("max_files", DEFAULT_MAX_FILES), int, "max_files"),
         max_file_chars=_expect(raw.get("max_file_chars", DEFAULT_MAX_FILE_CHARS), int, "max_file_chars"),
+        chars_per_token=float(
+            _expect(raw.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN), (int, float), "chars_per_token")
+        ),
     )
+    if isinstance(raw.get("chars_per_token"), bool) or not (
+        MIN_CHARS_PER_TOKEN <= cfg.chars_per_token <= MAX_CHARS_PER_TOKEN
+    ):
+        raise ReviewError(
+            f"config: chars_per_token must be a number from {MIN_CHARS_PER_TOKEN} to {MAX_CHARS_PER_TOKEN}"
+        )
     if cfg.max_total_chars < 50_000:
         raise ReviewError(
             f"config: context_tokens {context:,} minus max_output_tokens "
@@ -617,11 +629,16 @@ def gather_context(gh: GitHub, cfg: Config, pr: dict[str, Any], notices: Notices
     files = [f for f in files if not is_generated(f["filename"])]
     if not files:
         return Skip(head, "only generated files changed; nothing to review")
-    if len(files) > cfg.max_files:
+    # Binaries are only named, so they don't count toward the file limit.
+    reviewable = sum(1 for f in files if not is_binary(f["filename"]))
+    if reviewable > cfg.max_files:
         return Skip(
-            head, f"the PR changes {len(files)} files (limit {cfg.max_files}); split it to get a review"
+            head, f"the PR changes {reviewable} files (limit {cfg.max_files}); split it to get a review"
         )
 
+    # An added file's patch is its whole content with "+" in front of each line.
+    # Its full content is sent under ### FILE anyway, so the diff only names it.
+    new_file_note = "(new file: full content under its ### FILE entry below)\n"
     diff_parts, changed = [], []
     for f in files:
         name = f["filename"]
@@ -631,18 +648,24 @@ def gather_context(gh: GitHub, cfg: Config, pr: dict[str, Any], notices: Notices
         if name.endswith(".ipynb"):
             old = gh.read_file(f.get("previous_filename") or name, base) if f["status"] != "added" else None
             new = None if f["status"] == "removed" else gh.read_file(name, head)
-            diff_parts.append(file_header(f) + notebook_diff(old, new, name))
+            if f["status"] == "added" and new is not None:
+                diff_parts.append(file_header(f) + new_file_note)
+            else:
+                diff_parts.append(file_header(f) + notebook_diff(old, new, name))
             if new is not None:
                 body = truncate(f"file {name}", notebook_to_text(new), cfg.max_file_chars, notices)
                 changed.append(f"### FILE: {name} (cell sources only)\n{body}")
             continue
         patch = f.get("patch")
-        if patch is None and f.get("changes", 1) > 0:
-            notices.warn(f"GitHub shows no patch for {name} (too large); reviewed from its full content")
-        diff_parts.append(file_header(f) + (patch or "(no text diff)") + "\n")
+        content = None if f["status"] == "removed" else gh.read_file(name, head)
+        if f["status"] == "added" and content is not None:
+            diff_parts.append(file_header(f) + new_file_note)
+        else:
+            if patch is None and f.get("changes", 1) > 0:
+                notices.warn(f"GitHub shows no patch for {name} (too large); reviewed from its full content")
+            diff_parts.append(file_header(f) + (patch or "(no text diff)") + "\n")
         if f["status"] == "removed":
             continue
-        content = gh.read_file(name, head)
         if content is None:
             notices.warn(f"{name} could not be read at the PR head; reviewed from the diff only")
             continue

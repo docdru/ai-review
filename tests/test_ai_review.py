@@ -203,7 +203,7 @@ class TestConfig(unittest.TestCase):
 
     def test_budget_derived_from_model_window(self) -> None:
         cfg = ar.parse_config(CONFIG)
-        self.assertEqual(cfg.max_total_chars, (256_000 - 8_192) * 2)  # ~496k chars
+        self.assertEqual(cfg.max_total_chars, (256_000 - 8_192) * 3)  # ~743k chars
 
     def test_unknown_model_needs_context_tokens(self) -> None:
         with self.assertRaisesRegex(ar.ReviewError, "context_tokens"):
@@ -211,7 +211,14 @@ class TestConfig(unittest.TestCase):
         cfg = ar.parse_config(
             CONFIG.replace('model = "mistral-large-2512"', 'model = "x"\ncontext_tokens = 128_000')
         )
-        self.assertEqual(cfg.max_total_chars, (128_000 - 8_192) * 2)
+        self.assertEqual(cfg.max_total_chars, (128_000 - 8_192) * 3)
+
+    def test_chars_per_token(self) -> None:
+        cfg = ar.parse_config("chars_per_token = 2.5\n" + CONFIG)
+        self.assertEqual(cfg.max_total_chars, int((256_000 - 8_192) * 2.5))
+        for bad in ("1.0", "5", "true", '"3"'):
+            with self.subTest(bad), self.assertRaises(ar.ReviewError):
+                ar.parse_config(CONFIG.replace("model =", f"chars_per_token = {bad}\nmodel =", 1))
 
     def test_errors(self) -> None:
         cases = {
@@ -465,6 +472,46 @@ class TestGather(Base):
         self.assertIn("+x = 9", ctx.diff)
         self.assertNotIn('{"cells"', ctx.diff)
         self.assertIn("### FILE: ex.ipynb (cell sources only)", ctx.changed_files[0])
+
+    def test_added_file_sent_once(self) -> None:
+        patch = "@@ -0,0 +1,2 @@\n+story = 1\n+world = 2"
+        self.serve_pr(
+            [
+                file_entry("packs/world.json", "added", patch=patch),
+                file_entry("gone.json", "added", patch=patch),
+            ]
+        )
+        self.serve_file("packs/world.json", "story = 1\nworld = 2\n")
+        self.serve_file("docs/spec.md", "s")
+        n = ar.Notices()
+        ctx = ar.gather_context(self.gh, self.cfg, pr_json(), n)
+        assert isinstance(ctx, ar.Context)
+        world = ctx.diff.split("### DIFF: gone.json")[0]
+        self.assertIn("### DIFF: packs/world.json (added, +1/-1)\n(new file: full content", world)
+        self.assertNotIn("+story = 1", world)  # not duplicated in the diff
+        self.assertIn("### FILE: packs/world.json\nstory = 1", ctx.changed_files[0])
+        # an added file that can't be read keeps its patch, so nothing is lost
+        self.assertIn("### DIFF: gone.json (added, +1/-1)\n@@ -0,0 +1,2 @@\n+story = 1", ctx.diff)
+        self.assertIn("gone.json could not be read", "\n".join(n.items))
+
+    def test_added_notebook_sent_once(self) -> None:
+        self.serve_pr([file_entry("new.ipynb", "added", patch="{}")])
+        self.serve_file("new.ipynb", TestNotebook.NB)
+        self.serve_file("docs/spec.md", "s")
+        ctx = ar.gather_context(self.gh, self.cfg, pr_json(), ar.Notices())
+        assert isinstance(ctx, ar.Context)
+        self.assertIn("(new file: full content", ctx.diff)
+        self.assertNotIn("+x = 1", ctx.diff)
+        self.assertIn("x = 1", ctx.changed_files[0])
+
+    def test_binaries_do_not_count_toward_max_files(self) -> None:
+        files = [file_entry(f"shots/{i}.jpg", "added", patch=None) for i in range(60)]
+        files.append(file_entry("src/app.py"))
+        self.serve_pr(files)
+        self.serve_file("src/app.py", "x")
+        self.serve_file("docs/spec.md", "s")
+        ctx = ar.gather_context(self.gh, self.cfg, pr_json(), ar.Notices())
+        self.assertIsInstance(ctx, ar.Context)
 
     def test_skips(self) -> None:
         self.serve_pr([file_entry("web/pnpm-lock.yaml")])

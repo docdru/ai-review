@@ -17,6 +17,13 @@
   instead of 2, based on ~3.6 measured in real reviews: ≈ 743k instead of
   ≈ 496k characters for Mistral Large 3. Configurable as `chars_per_token`.
 - Binary files no longer count toward `max_files`.
+- **A changed reference doc is sent once.** When a PR changes a reference doc
+  (say the spec), its full new version was sent twice: as a reference doc and
+  again as a changed file, where it competed with the code for room and was
+  the first thing trimmed. Now the diff keeps its patch, and the changed-files
+  list points to the reference copy. A doc longer than its `max_chars` still
+  keeps its full copy as a changed file. On kidsmedia this saves ~95–115k
+  characters on every PR that touches its 114k-character spec.
 
 ## 1.0.0 – 2026-11-05
 

@@ -636,9 +636,26 @@ def gather_context(gh: GitHub, cfg: Config, pr: dict[str, Any], notices: Notices
             head, f"the PR changes {reviewable} files (limit {cfg.max_files}); split it to get a review"
         )
 
+    # Reference docs at the PR head, so a docs PR is reviewed against the
+    # documents it proposes.
+    ref_parts = []
+    whole_refs = set()  # reference docs sent in full (not cut at max_chars)
+    for doc in cfg.reference_docs:
+        text = gh.read_file(doc.path, head)
+        if text is None:
+            if doc.required:
+                notices.warn(f"{doc.path} not found at the PR head; checks against it were not possible")
+            continue
+        if len(text) <= doc.max_chars:
+            whole_refs.add(doc.path)
+        role = f" -- {doc.role}" if doc.role else ""
+        ref_parts.append(f"### {doc.path}{role}\n" + truncate(doc.path, text, doc.max_chars, notices))
+    refs = "\n\n".join(ref_parts)
+
     # An added file's patch is its whole content with "+" in front of each line.
     # Its full content is sent under ### FILE anyway, so the diff only names it.
     new_file_note = "(new file: full content under its ### FILE entry below)\n"
+    ref_file_note = "(full new version under the reference documents above)\n"
     diff_parts, changed = [], []
     for f in files:
         name = f["filename"]
@@ -657,6 +674,16 @@ def gather_context(gh: GitHub, cfg: Config, pr: dict[str, Any], notices: Notices
                 changed.append(f"### FILE: {name} (cell sources only)\n{body}")
             continue
         patch = f.get("patch")
+        if name in whole_refs and f["status"] != "removed":
+            # A changed reference doc is sent once: its diff here, and its full
+            # new version with the reference docs (it used to be sent in full
+            # twice, the second copy competing with the changed files for room).
+            if f["status"] == "added":
+                diff_parts.append(file_header(f) + ref_file_note)
+            else:
+                diff_parts.append(file_header(f) + (patch or "(no text diff)") + "\n")
+            changed.append(f"### FILE: {name}\n" + ref_file_note)
+            continue
         content = None if f["status"] == "removed" else gh.read_file(name, head)
         if f["status"] == "added" and content is not None:
             diff_parts.append(file_header(f) + new_file_note)
@@ -677,19 +704,6 @@ def gather_context(gh: GitHub, cfg: Config, pr: dict[str, Any], notices: Notices
         return Skip(
             head, f"the diff is {len(diff):,} chars (limit {HARD_SKIP_CHARS:,}); split the PR to get a review"
         )
-
-    # Reference docs at the PR head, so a docs PR is reviewed against the
-    # documents it proposes.
-    ref_parts = []
-    for doc in cfg.reference_docs:
-        text = gh.read_file(doc.path, head)
-        if text is None:
-            if doc.required:
-                notices.warn(f"{doc.path} not found at the PR head; checks against it were not possible")
-            continue
-        role = f" -- {doc.role}" if doc.role else ""
-        ref_parts.append(f"### {doc.path}{role}\n" + truncate(doc.path, text, doc.max_chars, notices))
-    refs = "\n\n".join(ref_parts)
 
     title, body = pr.get("title") or "", pr.get("body") or ""
     system_chars = len(build_system_prompt(cfg))

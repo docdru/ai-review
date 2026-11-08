@@ -494,6 +494,45 @@ class TestGather(Base):
         self.assertIn("### DIFF: gone.json (added, +1/-1)\n@@ -0,0 +1,2 @@\n+story = 1", ctx.diff)
         self.assertIn("gone.json could not be read", "\n".join(n.items))
 
+    def test_changed_reference_doc_sent_once(self) -> None:
+        spec = "# Spec\n\n## 1 Rules\nGrace lets the playing file finish.\n"
+        self.serve_pr(
+            [
+                file_entry("docs/spec.md", patch="@@ -3 +3 @@\n-Old.\n+Grace lets the playing file finish."),
+                file_entry("AGENTS.md", "added", patch="@@ -0,0 +1 @@\n+Be strict."),
+                file_entry("src/app.py"),
+            ]
+        )
+        self.serve_file("docs/spec.md", spec)
+        self.serve_file("AGENTS.md", "Be strict.\n")
+        self.serve_file("src/app.py", "print('app')")
+        n = ar.Notices()
+        ctx = ar.gather_context(self.gh, self.cfg, pr_json(), n)
+        assert isinstance(ctx, ar.Context)
+        # full text once, with the reference docs
+        self.assertIn("### docs/spec.md -- product spec\n" + spec, ctx.refs)
+        self.assertIn("### AGENTS.md\nBe strict.", ctx.refs)
+        # the diff keeps the patch of a modified doc; an added doc is only named
+        self.assertIn("+Grace lets the playing file finish.", ctx.diff)
+        self.assertIn("### DIFF: AGENTS.md (added, +1/-1)\n(full new version under the reference", ctx.diff)
+        self.assertNotIn("+Be strict.", ctx.diff)
+        # the changed-files list only points to the reference copy
+        joined = "\n\n".join(ctx.changed_files)
+        self.assertEqual(joined.count("Grace lets the playing file finish."), 0)
+        self.assertIn("### FILE: docs/spec.md\n(full new version under the reference", joined)
+        self.assertIn("### FILE: src/app.py\nprint('app')", joined)
+        self.assertEqual(n.items, [])
+
+    def test_reference_doc_over_max_chars_keeps_its_full_copy(self) -> None:
+        big = "# Spec\n" + "x" * 60_000  # the test config caps docs/spec.md at 50,000
+        self.serve_pr([file_entry("docs/spec.md")])
+        self.serve_file("docs/spec.md", big)
+        n = ar.Notices()
+        ctx = ar.gather_context(self.gh, self.cfg, pr_json(), n)
+        assert isinstance(ctx, ar.Context)
+        self.assertIn("[truncated", ctx.refs)  # the reference copy is cut ...
+        self.assertIn("### FILE: docs/spec.md\n" + big, ctx.changed_files[0])  # ... so the file stays whole
+
     def test_added_notebook_sent_once(self) -> None:
         self.serve_pr([file_entry("new.ipynb", "added", patch="{}")])
         self.serve_file("new.ipynb", TestNotebook.NB)

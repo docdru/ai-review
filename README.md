@@ -114,8 +114,9 @@ about 3.6 characters per token; the default of 3 leaves headroom for text that
 tokenizes worse.
 
 New files are sent once: the diff only names them, and their full content
-follows with the other changed files. Ordinary PRs are far below the budget
-and see no truncation. Above it, changed files are trimmed first (spread
+follows with the other changed files. A changed reference doc is sent once too:
+its patch in the diff, its full new version with the reference docs. Ordinary
+PRs are far below the budget and see no truncation. Above it, changed files are trimmed first (spread
 proportionally), then the diff; reference docs never. Every cut is marked for
 the model and listed as a notice in the comment. PRs with more than
 `max_files` non-binary files or a diff over 1.5M characters get a "review

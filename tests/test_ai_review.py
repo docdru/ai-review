@@ -954,6 +954,20 @@ class TestRelatedLookup(unittest.TestCase):
         self.assertEqual(sorted(snap.paths), ["big.ts", "logo.png", "src/a.ts"])
         self.assertEqual(snap.texts, {"src/a.ts": "A"})  # unwanted and oversized files are only named
 
+    def test_snapshot_stops_reading_at_the_total_limit_but_keeps_naming(self) -> None:
+        saved = ar.SNAPSHOT_TOTAL_BYTES
+        ar.SNAPSHOT_TOTAL_BYTES = 10
+        try:
+            snap = ar.read_snapshot(
+                tarball({"a.ts": "12345678", "b.ts": "12345", "c.ts": "1"}), lambda _: True
+            )
+        finally:
+            ar.SNAPSHOT_TOTAL_BYTES = saved
+        self.assertEqual(snap.paths, ["a.ts", "b.ts", "c.ts"])
+        self.assertEqual(list(snap.texts), ["a.ts"])  # nothing after the limit, even if it would fit
+        self.assertFalse(snap.complete)
+        self.assertTrue(ar.read_snapshot(tarball({"a.ts": "1"}), lambda _: True).complete)
+
     def test_js_imports_resolve_relative_specifiers(self) -> None:
         known = {"src/a.ts", "src/b.tsx", "src/lib/index.ts", "src/c.mjs", "src/d.ts", "top.ts", "src/e.ts"}
         text = """
@@ -1131,7 +1145,10 @@ class TestRelatedGather(Base):
         ctx, _ = self.gather(RELATED_ALL + "max_files = 2\n")
         self.assertEqual(ctx.related.count("### RELATED:"), 2)
         self.assertIn("### RELATED: src/server.ts", ctx.related)
-        self.assertIn("Related files not sent for lack of room: src/helper.ts, src/far/away.ts", ctx.related)
+        self.assertIn(
+            "Related files not sent (no room, or too large to read): src/helper.ts, src/far/away.ts",
+            ctx.related,
+        )
         self.assertEqual(
             ctx.related_summary, "1 test, 0 of 1 imported file, 1 of 2 importing files, nearby file names"
         )
@@ -1149,7 +1166,37 @@ class TestRelatedGather(Base):
         ctx, _ = self.gather("\n[related]\ntests = true\nimports = true\nmax_chars = 2500\n")
         self.assertLessEqual(len(ctx.related), 2500)
         self.assertIn("### RELATED: src/gate.test.ts", ctx.related)
-        self.assertIn("not sent for lack of room: src/helper.ts", ctx.related)
+        self.assertIn("too large to read): src/helper.ts", ctx.related)
+
+    def test_related_file_too_large_to_read_is_counted_and_named(self) -> None:
+        big = "import './gate';\n" + "x" * ar.SNAPSHOT_FILE_BYTES
+        self.serve_repo({**self.REPO_FILES, "src/big.ts": big, "src/gate.test.ts": big})
+        ctx, _ = self.gather("\n[related]\ntests = true\nimports = true\n")
+        self.assertNotIn("### RELATED: src/gate.test.ts", ctx.related)
+        self.assertIn("too large to read): src/gate.test.ts", ctx.related)
+        self.assertEqual(ctx.related_summary, "0 of 1 test, 1 imported file, 2 importing files")
+
+    def test_incomplete_snapshot_is_a_notice(self) -> None:
+        self.serve_repo()
+        saved = ar.SNAPSHOT_TOTAL_BYTES
+        ar.SNAPSHOT_TOTAL_BYTES = 60
+        try:
+            _, notices = self.gather(RELATED_ALL)
+        finally:
+            ar.SNAPSHOT_TOTAL_BYTES = saved
+        self.assertEqual(len(notices.items), 1)
+        self.assertIn("related files may be missing", notices.items[0])
+
+    def test_oversized_archive_is_refused_with_a_notice(self) -> None:
+        saved = ar.MAX_TARBALL_BYTES
+        ar.MAX_TARBALL_BYTES = 10
+        try:
+            self.serve_repo()
+            ctx, notices = self.gather(RELATED_ALL)
+        finally:
+            ar.MAX_TARBALL_BYTES = saved
+        self.assertEqual(ctx.related_summary, "none found")
+        self.assertIn("more than 10 bytes, which this action does not read", notices.items[0])
 
     def test_no_room_left_by_the_pr(self) -> None:
         self.serve_repo()

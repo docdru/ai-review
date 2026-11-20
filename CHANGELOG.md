@@ -22,8 +22,11 @@
   3 of 9 importing files"), and `--dry-run` shows the part and its size.
 - For tests, imports and nearby names the repository is downloaded once as an
   archive and read in memory: nothing is written to disk, nothing is run,
-  links are ignored. If the download fails, the review still runs, with a
-  notice. Rules alone need no download.
+  links are ignored. Memory is bounded: no response is buffered beyond
+  150 MB, a file over 300 kB is only named, and reading stops at 200 MB of
+  text (with a notice). A related file that is too large to read is counted
+  and named like one that did not fit. If the download fails, the review still
+  runs, with a notice. Rules alone need no download.
 - Without a `[related]` table nothing changes: same prompt, same API calls.
 
 ## 1.1.0 – 2026-11-06

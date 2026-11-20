@@ -90,7 +90,11 @@ NEARBY_NAMES_PER_DIR = 80
 MAX_TESTS_PER_FILE = 3
 LEFT_OUT_NAMES = 30  # names listed when related files did not fit
 SNAPSHOT_FILE_BYTES = 300_000  # larger files are named but not read from the archive
+SNAPSHOT_TOTAL_BYTES = 200_000_000  # text kept in memory from one archive
 MAX_TARBALL_BYTES = 150_000_000
+# No response is buffered beyond this: one byte more than the largest body the
+# script accepts, so an oversized archive is recognized without reading it all.
+MAX_RESPONSE_BYTES = MAX_TARBALL_BYTES + 1
 TARBALL_TIMEOUT = 120
 
 DEFAULT_BINARY_SUFFIXES = (
@@ -397,7 +401,7 @@ def _urllib_send(
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
+            return resp.status, dict(resp.headers), resp.read(MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers or {}), exc.read()
 
@@ -553,7 +557,9 @@ class GitHub:
         status, _, body = self._call("GET", f"/repos/{self.repo}/tarball/{ref}", timeout=TARBALL_TIMEOUT)
         self._check(status, body, what)
         if len(body) > MAX_TARBALL_BYTES:
-            raise ReviewError(f"{what}: {len(body):,} bytes is more than this action reads")
+            raise ReviewError(
+                f"{what}: more than {MAX_TARBALL_BYTES:,} bytes, which this action does not read"
+            )
         return body
 
     def send(self, method: str, path: str, payload: dict[str, Any]) -> Any:
@@ -714,14 +720,18 @@ class Snapshot:
 
     paths: list[str]
     texts: dict[str, str]
+    complete: bool = True  # False: the text limit was reached, later files are only named
 
 
 def read_snapshot(archive: bytes, wanted: Callable[[str], bool]) -> Snapshot:
     """Read a GitHub tarball in memory. Nothing is written to disk and nothing
     is executed: members are only listed and, for wanted regular files, read
-    as text. Links and special files are ignored."""
+    as text. Links and special files are ignored. Memory is bounded: a file
+    over SNAPSHOT_FILE_BYTES is only named, and so is everything after
+    SNAPSHOT_TOTAL_BYTES of text."""
     paths: list[str] = []
     texts: dict[str, str] = {}
+    kept = 0
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
         for member in tar:
             if not member.isfile():
@@ -732,10 +742,14 @@ def read_snapshot(archive: bytes, wanted: Callable[[str], bool]) -> Snapshot:
                 continue
             paths.append(path)
             if member.size <= SNAPSHOT_FILE_BYTES and wanted(path):
+                if kept + member.size > SNAPSHOT_TOTAL_BYTES:
+                    kept = SNAPSHOT_TOTAL_BYTES + 1  # stop reading, keep naming
+                    continue
                 handle = tar.extractfile(member)
                 if handle is not None:
                     texts[path] = handle.read().decode("utf-8", "replace")
-    return Snapshot(paths, texts)
+                    kept += member.size
+    return Snapshot(paths, texts, complete=kept <= SNAPSHOT_TOTAL_BYTES)
 
 
 def _resolve_js(target: str, known: set[str]) -> str | None:
@@ -999,6 +1013,12 @@ def gather_related(
                 f"nearby file names were not added"
             )
 
+    if snap is not None and not snap.complete:
+        notices.warn(
+            f"related context: the repository holds more than {SNAPSHOT_TOTAL_BYTES:,} bytes of text; "
+            f"files past that were not read, so related files may be missing"
+        )
+
     parts: list[str] = []
     used = 0
     if snap is not None and rel.nearby:
@@ -1020,6 +1040,12 @@ def gather_related(
             if text is None:
                 notices.warn(f"related context: {path} (named in related.rules) not found at the PR head")
                 continue
+        if text is None and kind != "rule":
+            # In the repository but not read from the archive (over the size
+            # limits): counted and named, never dropped silently.
+            totals[kind] += 1
+            left_out.append(path)
+            continue
         if text is None:
             continue
         totals[kind] += 1
@@ -1039,7 +1065,7 @@ def gather_related(
     if left_out:
         shown = ", ".join(left_out[:LEFT_OUT_NAMES])
         more = f" (+{len(left_out) - LEFT_OUT_NAMES} more)" if len(left_out) > LEFT_OUT_NAMES else ""
-        parts.append(f"Related files not sent for lack of room: {shown}{more}")
+        parts.append(f"Related files not sent (no room, or too large to read): {shown}{more}")
 
     def account(kind: str, word: str) -> str | None:
         if not totals[kind]:

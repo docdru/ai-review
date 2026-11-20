@@ -35,11 +35,13 @@ advisory: not a required check, and its findings should be verified.
    file, the PR title and description, and the configured reference documents
    (spec, README, AGENTS.md, ...). Notebooks are sent as cell sources without
    outputs. Generated and binary files are listed by name only.
-3. Sends it to Mistral and asks for findings per configured section, plus a
+3. Optionally adds **related context**: unchanged files that help judge the
+   change (see [Related context](#related-context)).
+4. Sends it to Mistral and asks for findings per configured section, plus a
    built-in "Surprising changes" section.
-4. Posts or updates the comment: findings sorted by severity, minor ones
+5. Posts or updates the comment: findings sorted by severity, minor ones
    folded away, a verdict computed from the findings, context notices, the
-   model and token usage.
+   model, token usage and which related files were sent.
 
 Nothing from the PR is checked out, installed, imported or executed. The
 script uses only the Python standard library; nothing is installed.
@@ -105,6 +107,50 @@ Unknown keys are errors, so typos fail loudly.
 | `max_file_chars` | `150000` | per changed file |
 | `chars_per_token` | `3.0` | sizes the context budget (1.5–4.5); lower it if the model reports an oversized request |
 | `[[sections]]` | – (≥ 1) | `key`, `title`, `checklist`, `security = false`, `reference = false`, `labels` (4 strings) |
+| `[related]` | off | `tests`, `imports`, `nearby` (each `false`), `max_chars = 200000`, `max_file_chars = 40000`, `max_files = 30`, `[[related.rules]]` with `when` and `send` |
+
+### Related context
+
+By default the reviewer sees the PR and the reference docs, and nothing else of
+the repository. It cannot know that a changed function has a caller that now
+breaks, or that the test next to a changed file no longer matches. `[related]`
+sends unchanged files along for that:
+
+```toml
+[related]
+tests = true     # tests of the changed files, found by name
+imports = true   # files that import the changed files, and files they import
+nearby = true    # names of the files and folders next to the changed files
+
+[[related.rules]]            # "when a path like this changes, also send ..."
+when = ["src/api/"]          # a folder prefix, or a glob ("*.sql"; * also crosses folders)
+send = ["src/api/contract.py"]
+```
+
+| | What is sent | Found how |
+|---|---|---|
+| `tests` | Up to 3 tests per changed file | By name, in the same folder or under a tests folder: `x.test.ts`, `x.spec.ts` (also `x.dom.test.tsx`), `test_x.py`, `x_test.go`, `XTest.kt` |
+| `imports` | Files that import a changed file, and files it imports: one step, no further | JavaScript and TypeScript relative imports (`./x`, `./x.js` for `x.ts`, folder `index`); Python relative imports, and absolute modules that fit exactly one file. Package names and path aliases are not followed |
+| `nearby` | File and folder names, no content | The folders of the changed files |
+| rules | The files a rule names | A changed path matches `when` |
+
+Order and room: files by rule first, then tests, then importing and imported
+files taking turns, the closest first. Related files only use the room the PR
+left free, at most `max_chars`, never more than `max_files`, each cut at
+`max_file_chars` with a marker. They never push out the diff or the changed
+files. Files that did not fit are named in the prompt, and the comment's last
+line gives the account: `Related context: 2 tests, 3 of 9 importing files`.
+
+The reviewer is told that these files are context, not part of the PR: it uses
+them to judge the change and reports a finding against the changed line that
+causes it.
+
+For `tests`, `imports` and `nearby` the action downloads the repository at the
+PR head once, as an archive, and reads it in memory. Nothing is written to
+disk and nothing is run; links and files over 300 kB are only named. If the
+download fails, the review runs without them and says so. Rules alone need no
+download. Expect more input tokens per review: on a 30-file PR in a large
+TypeScript repository, about 185k characters of related files on top of 380k.
 
 ### Context budget
 

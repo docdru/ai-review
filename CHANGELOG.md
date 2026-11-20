@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.2.0 – 2026-11-20
+
+- **Related context (`[related]`, off by default).** Until now the reviewer saw
+  the diff, the changed files and the reference docs, and nothing else of the
+  repository: not the callers of a changed function, not the test next to a
+  changed file. Four additions, each switched on in the config:
+  - `tests = true`: the tests that belong to a changed file by name
+    (`x.test.ts`, `x.spec.ts`, `test_x.py`, `x_test.go`, `XTest.kt`).
+  - `imports = true`: one step along the imports, in both directions: files
+    that import a changed file and files it imports. JavaScript, TypeScript and
+    Python; relative imports, and absolute Python modules that fit one file.
+  - `nearby = true`: the names of the files and folders next to the changed
+    files, so the reviewer knows what exists.
+  - `[[related.rules]]`: "when a path like this changes, also send these
+    files", for contracts and interfaces a change must honour.
+- Related files only use room the PR left free (at most `related.max_chars`,
+  200,000 by default), never push out the diff or the changed files, and are
+  capped per file and in number. What did not fit is named in the prompt.
+- The comment's last line says what was sent ("Related context: 2 tests,
+  3 of 9 importing files"), and `--dry-run` shows the part and its size.
+- For tests, imports and nearby names the repository is downloaded once as an
+  archive and read in memory: nothing is written to disk, nothing is run,
+  links are ignored. Memory is bounded: no response is buffered beyond
+  150 MB, a file over 300 kB is only named, and reading stops at 200 MB of
+  text (with a notice). A related file that is too large to read is counted
+  and named like one that did not fit. If the download fails, the review still
+  runs, with a notice. Rules alone need no download.
+- Without a `[related]` table nothing changes: same prompt, same API calls.
+
 ## 1.1.0 – 2026-11-06
 
 - **Evidence for findings.** Every finding about a file carries a `quote`: one

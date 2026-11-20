@@ -9,11 +9,12 @@ import io
 import json
 import os
 import sys
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -169,6 +170,31 @@ class Base(unittest.TestCase):
         with redirect_stdout(out):
             ar.run(argv, {**base_env, **(env or {})})
         return out.getvalue()
+
+
+def tarball(files: dict[str, str], links: dict[str, str] | None = None) -> bytes:
+    """A GitHub-style archive: everything under one top-level folder."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, text in files.items():
+            data = text.encode()
+            info = tarfile.TarInfo(f"docdru-demo-hhhhhhh/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        for name, target in (links or {}).items():
+            info = tarfile.TarInfo(f"docdru-demo-hhhhhhh/{name}")
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            tar.addfile(info)
+    return buf.getvalue()
+
+
+RELATED_ALL = """
+[related]
+tests = true
+imports = true
+nearby = true
+"""
 
 
 def file_entry(
@@ -875,5 +901,323 @@ class TestRun(Base):
         self.assertIn("::error::ai-review:", out.getvalue())
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestRelatedConfig(unittest.TestCase):
+    def test_off_by_default(self) -> None:
+        rel = ar.parse_config(CONFIG).related
+        self.assertFalse(rel.enabled)
+        self.assertEqual((rel.tests, rel.imports, rel.nearby, rel.rules), (False, False, False, []))
+
+    def test_parses_switches_limits_and_rules(self) -> None:
+        cfg = ar.parse_config(
+            CONFIG
+            + """
+[related]
+tests = true
+max_chars = 9000
+max_file_chars = 500
+max_files = 4
+
+[[related.rules]]
+when = ["src/api/", "*.sql"]
+send = ["src/api/contract.py"]
+"""
+        )
+        rel = cfg.related
+        self.assertTrue(rel.enabled and rel.needs_repo and rel.tests and not rel.imports)
+        self.assertEqual((rel.max_chars, rel.max_file_chars, rel.max_files), (9000, 500, 4))
+        self.assertEqual(rel.rules, [ar.ContextRule(("src/api/", "*.sql"), ("src/api/contract.py",))])
+
+    def test_rules_alone_need_no_repository_download(self) -> None:
+        cfg = ar.parse_config(CONFIG + '\n[[related.rules]]\nwhen = ["src/"]\nsend = ["a.py"]\n')
+        self.assertTrue(cfg.related.enabled)
+        self.assertFalse(cfg.related.needs_repo)
+
+    def test_errors(self) -> None:
+        cases = {
+            "\n[related]\ntest = true\n": "unknown key(s) in related: test",
+            '\n[related]\ntests = "yes"\n': "related.tests must be bool",
+            "\n[related]\nmax_files = 0\n": "must be positive",
+            '\n[[related.rules]]\nwhen = ["src/"]\n': "needs `when` (path patterns) and `send`",
+            '\n[[related.rules]]\nwhen = ["a"]\nsend = ["b"]\nrole = "x"\n': "unknown key(s) in related",
+        }
+        for extra, message in cases.items():
+            with self.subTest(extra=extra), self.assertRaises(ar.ReviewError) as cm:
+                ar.parse_config(CONFIG + extra)
+            self.assertIn(message, str(cm.exception))
+
+
+class TestRelatedLookup(unittest.TestCase):
+    def test_snapshot_strips_the_top_folder_and_ignores_links(self) -> None:
+        big = "x" * (ar.SNAPSHOT_FILE_BYTES + 1)
+        archive = tarball({"src/a.ts": "A", "logo.png": "PNG", "big.ts": big}, links={"evil": "/etc/passwd"})
+        snap = ar.read_snapshot(archive, lambda p: not p.endswith(".png"))
+        self.assertEqual(sorted(snap.paths), ["big.ts", "logo.png", "src/a.ts"])
+        self.assertEqual(snap.texts, {"src/a.ts": "A"})  # unwanted and oversized files are only named
+
+    def test_js_imports_resolve_relative_specifiers(self) -> None:
+        known = {"src/a.ts", "src/b.tsx", "src/lib/index.ts", "src/c.mjs", "src/d.ts", "top.ts", "src/e.ts"}
+        text = """
+import { b } from './b';
+import type { D } from "./d.js";
+export * from './lib';
+const c = await import('./c.mjs');
+const e = require("./e.ts?raw");
+import x from 'react';
+import up from '../top';
+import gone from './missing';
+import out from '../../outside';
+"""
+        self.assertEqual(
+            ar.js_imports("src/a.ts", text, known),
+            {"src/b.tsx", "src/d.ts", "src/lib/index.ts", "src/c.mjs", "src/e.ts", "top.ts"},
+        )
+
+    def test_py_imports_relative_and_unique_absolute(self) -> None:
+        paths = [
+            "server/app/main.py",
+            "server/app/rules.py",
+            "server/app/db/__init__.py",
+            "server/app/db/models.py",
+            "server/app/util.py",
+            "tools/util.py",
+            "server/settings.py",
+        ]
+        text = """
+from . import rules
+from .db import models as m, missing
+from .. import settings
+from app.db.models import Thing
+from app import rules as r
+import app.db, os
+import util
+"""
+        got = ar.py_imports("server/app/main.py", text, set(paths), ar._py_tail_index(paths))
+        self.assertEqual(
+            got,
+            {
+                "server/app/rules.py",
+                "server/app/db/__init__.py",
+                "server/app/db/models.py",
+                "server/settings.py",
+            },
+        )  # `util` fits two files, so it is left out; `os` is not in the repository
+
+    def test_tests_for_by_name_and_place(self) -> None:
+        paths = [
+            "pkg/src/gate.ts",
+            "pkg/src/gate.test.ts",
+            "pkg/src/gate.dom.test.tsx",
+            "pkg/src/__tests__/gate.spec.ts",
+            "pkg/src/gateway.test.ts",
+            "other/gate.test.ts",
+            "server/app/rules.py",
+            "server/tests/test_rules.py",
+            "elsewhere/test_rules.py",
+            "app/src/main/Player.kt",
+            "app/src/test/PlayerTest.kt",
+        ]
+        self.assertEqual(
+            ar.tests_for("pkg/src/gate.ts", paths),
+            ["pkg/src/gate.test.ts", "pkg/src/gate.dom.test.tsx", "pkg/src/__tests__/gate.spec.ts"],
+        )
+        self.assertEqual(ar.tests_for("server/app/rules.py", paths), ["server/tests/test_rules.py"])
+        self.assertEqual(ar.tests_for("app/src/main/Player.kt", paths), ["app/src/test/PlayerTest.kt"])
+        self.assertEqual(ar.tests_for("pkg/src/gate.test.ts", paths), [])  # a test has no test
+
+    def test_rule_patterns(self) -> None:
+        self.assertTrue(ar.rule_matches("src/api/", "src/api/v1/users.py"))
+        self.assertFalse(ar.rule_matches("src/api/", "src/apix.py"))
+        self.assertTrue(ar.rule_matches("src/*.py", "src/deep/x.py"))
+        self.assertFalse(ar.rule_matches("*.sql", "src/x.py"))
+
+    def test_nearby_listing_names_files_and_folders(self) -> None:
+        paths = ["src/a.ts", "src/b.ts", "src/sub/c.ts", "README.md", "docs/x.md"]
+        self.assertEqual(
+            ar.nearby_listing(["src/a.ts", "README.md"], paths),
+            "./: README.md; folders: docs/, src/\nsrc/: a.ts, b.ts; folders: sub/",
+        )
+
+
+class TestRelatedGather(Base):
+    REPO_FILES: ClassVar[dict[str, str]] = {
+        "src/gate.ts": "import { helper } from './helper';\nexport const gate = 1;",
+        "src/gate.test.ts": "import { gate } from './gate';\ntest('gate')",
+        "src/helper.ts": "export const helper = 2;",
+        "src/server.ts": "import { gate } from './gate.js';\nstart(gate)",
+        "src/far/away.ts": "import { gate } from '../gate';\nfar(gate)",
+        "src/unrelated.ts": "export const nothing = 0;",
+        "src/contract.ts": "export interface Contract {}",
+        "web/pnpm-lock.yaml": "lock",
+        "docs/spec.md": "# Spec",
+    }
+
+    def serve_repo(self, files: dict[str, str] | None = None) -> None:
+        self.http.on(
+            "GET", f"{ar.GH_API}/repos/{REPO}/tarball/{HEAD}", resp(200, tarball(files or self.REPO_FILES))
+        )
+
+    def gather(self, extra: str, files: list[dict[str, Any]] | None = None) -> tuple[ar.Context, ar.Notices]:
+        self.serve_pr(files or [file_entry("src/gate.ts")])
+        self.serve_file("src/gate.ts", self.REPO_FILES["src/gate.ts"])
+        self.serve_file("docs/spec.md", "# Spec")
+        notices = ar.Notices()
+        ctx = ar.gather_context(self.gh, ar.parse_config(CONFIG + extra), pr_json(), notices)
+        assert isinstance(ctx, ar.Context)
+        return ctx, notices
+
+    def downloads(self) -> int:
+        return sum(1 for _, u, _, _ in self.http.calls if "/tarball/" in u)
+
+    def test_off_by_default_adds_nothing_and_downloads_nothing(self) -> None:
+        self.serve_repo()
+        ctx, notices = self.gather("")
+        self.assertEqual((ctx.related, ctx.related_summary), ("", ""))
+        self.assertEqual(self.downloads(), 0)
+        self.assertNotIn("Related files", ar.build_user_message(ctx))
+        self.assertNotIn("related files", ar.build_system_prompt(self.cfg))
+        self.assertEqual(notices.items, [])
+
+    def test_tests_imports_importers_and_nearby_names(self) -> None:
+        self.serve_repo()
+        ctx, notices = self.gather(RELATED_ALL)
+        self.assertEqual(self.downloads(), 1)
+        headers = [line for line in ctx.related.splitlines() if line.startswith("### RELATED")]
+        self.assertEqual(
+            headers,
+            [
+                "### RELATED: src/gate.test.ts (test for src/gate.ts)",
+                "### RELATED: src/server.ts (imports src/gate.ts)",  # callers and callees take turns,
+                "### RELATED: src/helper.ts (imported by src/gate.ts)",
+                "### RELATED: src/far/away.ts (imports src/gate.ts)",  # the same folder before farther away
+            ],
+        )
+        self.assertIn("start(gate)", ctx.related)
+        self.assertNotIn("nothing = 0", ctx.related)
+        self.assertNotIn("### RELATED: src/gate.ts", ctx.related)  # the changed file is not sent twice
+        self.assertIn(
+            "Files next to the changed files (names only):\nsrc/: contract.ts, gate.test.ts", ctx.related
+        )
+        self.assertEqual(ctx.related_summary, "1 test, 1 imported file, 2 importing files, nearby file names")
+        message = ar.build_user_message(ctx)
+        self.assertIn("\n\nRelated files, NOT changed by this PR", message)
+        self.assertLess(message.index("### FILE: src/gate.ts"), message.index("### RELATED:"))
+        self.assertIn(
+            "related files that this PR does NOT change",
+            ar.build_system_prompt(ar.parse_config(CONFIG + RELATED_ALL)),
+        )
+        self.assertEqual(notices.items, [])
+
+    def test_rule_sends_named_files_without_a_download(self) -> None:
+        send = '["src/contract.ts", "src/gone.ts", "docs/spec.md"]'
+        rule = f'\n[[related.rules]]\nwhen = ["src/"]\nsend = {send}\n'
+        self.serve_file("src/contract.ts", "export interface Contract {}")
+        ctx, notices = self.gather(rule)
+        self.assertEqual(self.downloads(), 0)
+        self.assertIn(
+            "### RELATED: src/contract.ts (sent whenever a path like src/gate.ts changes)", ctx.related
+        )
+        self.assertNotIn("### RELATED: docs/spec.md", ctx.related)  # already a reference doc
+        self.assertEqual(ctx.related_summary, "1 file by rule")
+        self.assertEqual(len(notices.items), 1)
+        self.assertIn("src/gone.ts (named in related.rules) not found", notices.items[0])
+
+    def test_rule_that_does_not_match_sends_nothing(self) -> None:
+        ctx, notices = self.gather('\n[[related.rules]]\nwhen = ["docs/"]\nsend = ["src/contract.ts"]\n')
+        self.assertEqual((ctx.related, ctx.related_summary), ("", "none found"))
+        self.assertEqual(notices.items, [])
+
+    def test_files_that_do_not_fit_are_named_not_dropped_silently(self) -> None:
+        self.serve_repo()
+        ctx, _ = self.gather(RELATED_ALL + "max_files = 2\n")
+        self.assertEqual(ctx.related.count("### RELATED:"), 2)
+        self.assertIn("### RELATED: src/server.ts", ctx.related)
+        self.assertIn("Related files not sent for lack of room: src/helper.ts, src/far/away.ts", ctx.related)
+        self.assertEqual(
+            ctx.related_summary, "1 test, 0 of 1 imported file, 1 of 2 importing files, nearby file names"
+        )
+
+    def test_long_related_file_is_cut_with_a_marker(self) -> None:
+        files = {**self.REPO_FILES, "src/helper.ts": "h" * 900}
+        self.serve_repo(files)
+        ctx, _ = self.gather("\n[related]\nimports = true\nmax_file_chars = 100\n")
+        self.assertIn("h" * 100 + "\n... [truncated, 800 chars omitted]", ctx.related)
+        self.assertNotIn("h" * 101, ctx.related)
+
+    def test_related_never_exceeds_its_room(self) -> None:
+        files = {**self.REPO_FILES, "src/helper.ts": "h" * 5000}
+        self.serve_repo(files)
+        ctx, _ = self.gather("\n[related]\ntests = true\nimports = true\nmax_chars = 2500\n")
+        self.assertLessEqual(len(ctx.related), 2500)
+        self.assertIn("### RELATED: src/gate.test.ts", ctx.related)
+        self.assertIn("not sent for lack of room: src/helper.ts", ctx.related)
+
+    def test_no_room_left_by_the_pr(self) -> None:
+        self.serve_repo()
+        self.serve_pr([file_entry("src/gate.ts")])
+        self.serve_file("src/gate.ts", "g" * 10)
+        self.serve_file("docs/spec.md", "# Spec")
+        cfg = ar.parse_config(CONFIG + RELATED_ALL)
+        cfg.context_tokens = (len(ar.build_system_prompt(cfg)) + 6000) // 3 + cfg.max_output_tokens
+        ctx = ar.gather_context(self.gh, cfg, pr_json(), ar.Notices())
+        assert isinstance(ctx, ar.Context)
+        self.assertEqual((ctx.related, ctx.related_summary), ("", "none, the PR left no room for it"))
+        self.assertEqual(self.downloads(), 0)
+
+    def test_failed_download_is_a_notice_and_rules_still_apply(self) -> None:
+        self.http.on("GET", f"{ar.GH_API}/repos/{REPO}/tarball/{HEAD}", resp(200, b"not a tarball"))
+        self.serve_file("src/contract.ts", "export interface Contract {}")
+        rule = RELATED_ALL + '\n[[related.rules]]\nwhen = ["src/"]\nsend = ["src/contract.ts"]\n'
+        ctx, notices = self.gather(rule)
+        self.assertEqual(ctx.related_summary, "1 file by rule")
+        self.assertEqual(len(notices.items), 1)
+        self.assertIn("the repository could not be read", notices.items[0])
+
+    def test_generated_binary_and_removed_files_are_left_out(self) -> None:
+        files = {
+            **self.REPO_FILES,
+            "src/gate.ts": "import './helper';\nimport '../web/pnpm-lock.yaml';\nimport './old';",
+            "src/old.ts": "export {}",
+        }
+        self.serve_repo(files)
+        ctx, _ = self.gather(
+            "\n[related]\nimports = true\n", [file_entry("src/gate.ts"), file_entry("src/old.ts", "removed")]
+        )
+        headers = [line for line in ctx.related.splitlines() if line.startswith("### RELATED")]
+        self.assertIn("### RELATED: src/helper.ts (imported by src/gate.ts)", headers)
+        self.assertFalse(any("pnpm-lock" in h or "src/old.ts" in h for h in headers))
+
+
+class TestRelatedRun(Base):
+    def test_footer_says_what_was_sent_and_quotes_from_related_files_verify(self) -> None:
+        self.serve_pr([file_entry("src/gate.ts")])
+        self.serve_file("src/gate.ts", "export const gate = 1;")
+        self.serve_file("docs/spec.md", "# Spec")
+        self.serve_file(".github/ai-review.toml", CONFIG + RELATED_ALL, BASE)
+        repo = {"src/gate.ts": "export const gate = 1;", "src/server.ts": "import './gate';\nstart(gate)"}
+        self.http.on("GET", f"{ar.GH_API}/repos/{REPO}/tarball/{HEAD}", resp(200, tarball(repo)))
+        review = {
+            "summary": "ok",
+            "security": [
+                {"severity": "P0", "file": "src/gate.ts", "quote": "start(gate)", "issue": "caller"}
+            ],
+            "spec": [],
+            "surprises": [],
+        }
+        self.http.on("POST", ar.MISTRAL_URL, mistral_ok(review))
+        self.run_cli([], {"MISTRAL_API_KEY": "k"})
+        [(_, _, payload)] = self.posted()
+        self.assertIn("Related context: 1 importing file, nearby file names.</sub>", payload["body"])
+        self.assertIn("`P0 · Critical` **src/gate.ts** -- caller", payload["body"])
+        sent = json.loads(next(d for m, u, _, d in self.http.calls if u == ar.MISTRAL_URL) or b"")
+        self.assertIn("### RELATED: src/server.ts (imports src/gate.ts)", sent["messages"][1]["content"])
+
+    def test_dry_run_shows_the_related_part(self) -> None:
+        self.serve_pr([file_entry("src/gate.ts")])
+        self.serve_file("src/gate.ts", "export const gate = 1;")
+        self.serve_file("docs/spec.md", "# Spec")
+        self.serve_file(".github/ai-review.toml", CONFIG + RELATED_ALL, BASE)
+        repo = {"src/gate.ts": "export const gate = 1;", "src/gate.test.ts": "test()"}
+        self.http.on("GET", f"{ar.GH_API}/repos/{REPO}/tarball/{HEAD}", resp(200, tarball(repo)))
+        out = self.run_cli(["--dry-run"])
+        self.assertIn("related files", out)
+        self.assertIn("related context: 1 test, nearby file names", out)

@@ -32,6 +32,20 @@ generated_suffixes = []
 # Added to the built-in binary list (images, fonts, archives, audio/video ...).
 extra_binary_suffixes = []
 
+# Optional: unchanged files that help judge the change. Off unless switched on
+# here. They only use room the PR left free; what does not fit is named.
+# [related]
+# tests = true            # tests of the changed files (x.test.ts, test_x.py, ...)
+# imports = true          # files that import the changed files, and files they import
+# nearby = true           # names of the files next to the changed files
+# max_chars = 200_000     # room for all related content
+# max_file_chars = 40_000 # per related file
+# max_files = 30
+#
+# [[related.rules]]       # when a changed path matches, also send these files
+# when = ["src/example/api/"]   # a folder prefix, or a glob such as "*.sql"
+# send = ["src/example/api/contract.py"]
+
 # Review sections, in order. A "Surprising changes" section is always added
 # last. security = true -> labels Critical/High/Medium/Low instead of
 # Blocker/Bug/Maintainability/Minor. reference = true -> every finding must
